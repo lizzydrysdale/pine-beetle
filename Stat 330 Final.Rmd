@@ -1,0 +1,175 @@
+---
+title: "Stat 330 Final"
+author: "Elizabeth Mitchell"
+date: "12/11/2019"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+The mountain pine beetle (MPB), once a helpful agent in the forest life cycle has become a harmful epidemic in the Rocky Mountains. In the last few decades there haven't been enough extremely cold winters to control the size of the beetle population. With the surplus population, beetles that in the past burrowed into weakened or dead trees are now attacking healthy trees as well and damaging entire forests. We want to examine infested areas and their features including the lowest temperature in January, highest temperature in August, the angle of the mountain, elevation and preciptation. We want to determine which factors contribute to risk of infestation as well as be able to predict regions that are at risk for future investation.
+
+```{r}
+library(ggplot2)
+library(gmodels)
+library(bestglm)
+library(pROC)
+library(stargazer)
+library(dplyr)
+library(car)
+library(stargazer)
+
+pine.beetles <- read.csv("PineBeetle.csv", sep = ",", head = TRUE)
+
+pine.beetles$Infested <- as.numeric(pine.beetles$Infested)
+
+pine.beetles$Infested[pine.beetles$Infested == 1] <- 0
+pine.beetles$Infested[pine.beetles$Infested == 2] <- 1
+
+pine.beetles <- mutate(pine.beetles, region = ifelse(NW == "Yes", "NW", ifelse(SC == "Yes", "SC", ifelse(SE == "Yes", "SE", ifelse(SW == "Yes", "SW", ifelse(WC == "Yes", "WC", ifelse(NC == "Yes", "NC", ifelse(EC == "Yes", "EC", NA))))))))
+
+ggplot(data = pine.beetles, mapping = aes(x = January, y = Infested)) + geom_point() + geom_jitter(height = .2, width = 1) + xlab("January Min Temp")
+
+ggplot(data = pine.beetles, mapping = aes(x = August_max, y = Infested)) + geom_point() + xlab("August Max Temp")+ geom_jitter(height = .2, width = 1)
+
+ggplot(data = pine.beetles, mapping = aes(x = Slope, y = Infested)) + geom_point() + geom_jitter(height = .1, width = 1)
+
+ggplot(data = pine.beetles, mapping = aes(x = Elev, y = Infested)) + geom_point() + geom_jitter(height = .2, width = 1) + xlab("Elevation")
+
+ggplot(data = pine.beetles, mapping = aes(x = Precip, y = Infested)) + geom_point() + geom_jitter(height = .2, width = 1) + xlab("Precipitation (inches)")
+
+addmargins(table(pine.beetles$region, pine.beetles$Infested))
+```
+
+```{r}
+pine.beetles$region <- NULL
+
+beetle_model <- bestglm(pine.beetles, IC = "AIC", method = "exhaustive", family = binomial)
+
+beetle_model <- beetle_model$BestModel
+summary(beetle_model)
+```
+
+$Y_{i}$ $\stackrel{ind}{\sim}$ Bern$(p_{i})$
+log$p_{i}\over1- p_{i}$ = $\beta_{0} + \beta_{1}x_{i1} + \beta_{2}x_{i2} + \beta_{3}x_{i3} + \beta_{4}x_{i4} + \beta_{5}x_{i5} + \beta_{6}x_{i6} + \beta_{7}x_{i7} + \beta_{8}x_{i8}$
+
+```{r}
+#check assumptions
+
+scatter.smooth(pine.beetles$January, pine.beetles$Infested, xlab = "January Min Temp", ylab = "Infested")
+scatter.smooth(pine.beetles$August_max, pine.beetles$Infested, xlab = "August Max Temp", ylab = "Infested")
+with(pine.beetles, lines(loess.smooth(August_max, Infested), col = "red"))
+
+scatter.smooth(pine.beetles$Slope, pine.beetles$Infested, xlab = "Slope", ylab = "Infested")
+
+plot(pine.beetles$Elev, pine.beetles$Infested, xlab = "Elevation", ylab = "Infested")
+with(pine.beetles, lines(loess.smooth(Elev, Infested), col = "red"))
+scatter.smooth(pine.beetles$Precip, pine.beetles$Infested, xlab = "Preciptation", ylab = "Infested")
+```
+
+
+```{r}
+(exp(confint(beetle_model))- 1)*100
+
+stargazer(beetle_model, out = "beetles.html", ci = T)
+
+```
+
+```{r}
+pred.probs <- predict.glm(beetle_model, type="response")
+
+thresh <- seq(from=0, to=1, length=10000) 
+
+misclass <- rep(NA,length=length(thresh)) #Empty vector to hold misclassification rates
+
+for(i in 1:length(thresh)) {
+  #If probability greater than threshold then 1 else 0
+  my.classification <- ifelse(pred.probs>thresh[i], 1, 0)
+  
+  # calculate the pct where my classification not eq truth
+  misclass[i] <- mean(my.classification!=pine.beetles$Infested)
+}
+
+(c <- thresh[which.min(misclass)])
+
+ggplot(mapping = aes(x = thresh, y = misclass)) + geom_point() + geom_vline(xintercept =c) + xlab("Threshold") + ylab("Missclassifications")
+
+my.roc <- roc(pine.beetles$Infested, pred.probs)
+ggplot() + geom_line(aes(x=1-my.roc[["specificities"]], y=my.roc[["sensitivities"]])) + geom_abline(intercept=0, slope=1)
+(auc(my.roc))
+```
+
+
+
+```{r}
+pred.class <- ifelse(pred.probs > c, 1, 0)
+
+conf.matrix <- addmargins(table(pred.class, pine.beetles$Infested))
+
+(sens <- conf.matrix[2,2]/conf.matrix[3, 2])
+(spec <- conf.matrix[1, 1]/conf.matrix[3, 1])
+(PPV <- conf.matrix[2,2]/conf.matrix[2, 3])
+(NPV <- conf.matrix[1, 1]/conf.matrix[1, 3])
+
+conf.matrix
+```
+
+
+```{r}
+## Choose number of CV studies to run in a loop & test set size
+n.cv <- 1000
+n.test <- round(.1*nrow(pine.beetles))
+
+## Set my threshold for classifying
+cutoff <- c
+  
+## Initialize matrices to hold CV results
+sens <- rep(NA, n.cv)
+spec <- rep(NA, n.cv)
+ppv <- rep(NA, n.cv)
+npv <- rep(NA, n.cv)
+auc <- rep(NA, n.cv)
+
+## Begin for loop
+for(cv in 1:n.cv){
+  
+  test.obs <- sample(1:nrow(pine.beetles), n.test)
+  test.set <- pine.beetles[test.obs,]
+  train.set <- pine.beetles[-test.obs,]
+  
+  ## Fit best model to training set
+  train.model <- glm(Infested ~ January + August_max + Slope + Elev + Precip + NC + SE + SW, data=train.set, family=binomial)
+  
+  ## Use fitted model to predict test set
+  pred.probs <- predict.glm(train.model, newdata=test.set, type="response")
+
+  ## Classify according to threshold
+  test.class <- ifelse(pred.probs>cutoff, 1, 0)
+  
+  ## Create a confusion matrix
+  conf.mat <- addmargins(table(factor(test.set$Infested, levels = c(0, 1)), factor(test.class, levels = c(0, 1))))
+
+  ## Pull of sensitivity, specificity, PPV and NPV using bracket notation
+  sens[cv] <- conf.mat[2,2]/conf.mat[2,3]
+  spec[cv] <- conf.mat[1,1]/conf.mat[1,3]
+  ppv[cv] <- conf.mat[2,2]/conf.mat[3,2]
+  npv[cv] <- conf.mat[1,1]/conf.mat[3,1]
+    
+
+}
+
+(mean(sens))
+(mean(spec))
+(mean(ppv))
+(mean(npv))
+```
+
+```{r}
+ten.years <- data.frame(January = c(-13.98, -17.8, -17.27, -12.52, -15.99, -11.97, -15.75, -16.19, -17.87, -12.44), August_max = c(15.89, 18.07, 16.74, 18.06, 18.23, 15.81, 16.85, 16.51, 17.84, 16.96), Slope = rep(18.07, 10), Elev = rep(1901.95, 10), Precip = c(771.13, 788.54, 677.63, 522.77, 732.32, 615.96, 805.9, 714.57, 740.5, 801.22), SE = rep("Yes", 10), NC = rep("No", 10), SW = rep("No", 10))
+
+predict.glm(beetle_model, newdata = ten.years, type = "response")
+
+mean(predict.glm(beetle_model, newdata = ten.years, type = "response"))
+```
+
